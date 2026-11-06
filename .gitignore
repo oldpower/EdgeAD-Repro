@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# 训练产物
+outputs/
+*.ckpt
+*.onnx
+
+# 工具临时文件
+.tools/
+.acl-recovery/
+
+# 编辑器
+.vscode/
