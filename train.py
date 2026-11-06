@@ -9,7 +9,14 @@ CPU 环境下的快速验证::
 
     python train.py --category bottle --epochs 5 --base 16 --k 8 --n 3 --batch-size 4
 
-恢复/复现实验时固定随机种子即可；训练产物默认写入 ``outputs/EdgeADLightning/<category>``。
+只有正常图的自采集数据（通用文件夹）::
+
+    python train.py --data-format folder --data-root D:/data/railway \
+        --dataset-name railway --normal-dir train \
+        --test-split-mode none --val-split-mode from_train --val-ratio 0.1 \
+        --skip-test --base 16 --k 8 --n 3 --epochs 50 --num-workers 0
+
+恢复/复现实验时固定随机种子即可；训练产物默认写入 ``outputs/EdgeADLightning/...``。
 """
 
 from __future__ import annotations
@@ -27,7 +34,8 @@ import torch  # noqa: E402  (在 warnings 过滤之后导入)
 from lightning.pytorch.callbacks import EarlyStopping  # noqa: E402
 from lightning.pytorch import seed_everything  # noqa: E402
 
-from anomalib.data import MVTecAD  # noqa: E402
+from anomalib.data import Folder, MVTecAD  # noqa: E402
+from anomalib.data.utils import TestSplitMode, ValSplitMode  # noqa: E402
 from anomalib.engine import Engine  # noqa: E402
 
 from lightning_model import EdgeADLightning  # noqa: E402
@@ -36,8 +44,33 @@ from lightning_model import EdgeADLightning  # noqa: E402
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="EdgeAD: prior-knowledge enhanced unsupervised anomaly detection")
     # 数据
-    parser.add_argument("--data-root", type=Path, default=Path("./datasets/mvtec"), help="MVTec AD 根目录")
-    parser.add_argument("--category", type=str, default="bottle", help="MVTec AD 类别")
+    parser.add_argument(
+        "--data-format",
+        choices=["mvtec", "folder"],
+        default="mvtec",
+        help="mvtec=MVTec AD 基准目录结构；folder=通用文件夹（自采集铁路数据用这个）",
+    )
+    parser.add_argument("--data-root", type=Path, default=Path("./datasets/mvtec"), help="数据集根目录")
+    parser.add_argument("--category", type=str, default="bottle", help="MVTec AD 类别（仅 --data-format mvtec）")
+    parser.add_argument("--dataset-name", type=str, default="railway", help="folder 模式的数据集名（用于输出目录命名）")
+    parser.add_argument("--normal-dir", type=str, default="train", help="folder 模式：正常训练图目录（相对 data-root）")
+    parser.add_argument("--abnormal-dir", type=str, nargs="+", default=None,
+                        help="folder 模式：异常图目录，可多个（相对 data-root）")
+    parser.add_argument("--normal-test-dir", type=str, default=None, help="folder 模式：正常测试图目录（可选）")
+    parser.add_argument("--mask-dir", type=str, default=None, help="folder 模式：异常 mask 目录（可选，用于 pixel 指标）")
+    parser.add_argument(
+        "--test-split-mode",
+        choices=[m.value for m in TestSplitMode],
+        default="none",
+        help="folder 模式：测试集来源；只有正常图时保持 none（train.py 会自动跳过测试）",
+    )
+    parser.add_argument(
+        "--val-split-mode",
+        choices=[m.value for m in ValSplitMode],
+        default="from_train",
+        help="folder 模式：验证集来源；只有正常图时用 from_train",
+    )
+    parser.add_argument("--val-ratio", type=float, default=0.1, help="folder 模式：从训练集划验证集的比例")
     parser.add_argument("--batch-size", type=int, default=8, help="训练 batch size")
     parser.add_argument("--eval-batch-size", type=int, default=8, help="验证/测试 batch size")
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader worker 数（Windows 建议 0）")
@@ -70,14 +103,45 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_datamodule(args: argparse.Namespace) -> MVTecAD:
-    return MVTecAD(
+def build_datamodule(args: argparse.Namespace) -> MVTecAD | Folder:
+    """构造数据模块。
+
+    * ``mvtec``：MVTec AD 基准目录（``root/<category>/train/good`` 等）；
+    * ``folder``：通用文件夹，适合自采集铁路数据。只有正常图时用
+      ``--normal-dir train --test-split-mode none --val-split-mode from_train``。
+    """
+    if args.data_format == "mvtec":
+        return MVTecAD(
+            root=args.data_root,
+            category=args.category,
+            train_batch_size=args.batch_size,
+            eval_batch_size=args.eval_batch_size,
+            num_workers=args.num_workers,
+            seed=args.seed,
+        )
+
+    return Folder(
+        name=args.dataset_name,
         root=args.data_root,
-        category=args.category,
+        normal_dir=args.normal_dir,
+        abnormal_dir=args.abnormal_dir,
+        normal_test_dir=args.normal_test_dir,
+        mask_dir=args.mask_dir,
         train_batch_size=args.batch_size,
         eval_batch_size=args.eval_batch_size,
         num_workers=args.num_workers,
+        test_split_mode=args.test_split_mode,
+        val_split_mode=args.val_split_mode,
+        val_split_ratio=args.val_ratio,
+        seed=args.seed,
     )
+
+
+def has_test_data(args: argparse.Namespace) -> bool:
+    """判断当前配置下是否存在可评估的测试集。"""
+    if args.data_format == "mvtec":
+        return True
+    return bool(args.abnormal_dir or args.normal_test_dir or args.test_split_mode != "none")
 
 
 def build_engine(args: argparse.Namespace) -> Engine:
@@ -133,6 +197,7 @@ def main() -> None:
 
     print("=" * 78)
     print(f"torch={torch.__version__} cuda={torch.cuda.is_available()} threads={torch.get_num_threads()}")
+    print(f"data={datamodule.name} format={args.data_format} root={args.data_root}")
     print(f"epochs={args.epochs} max_steps={args.max_steps} batch={args.batch_size} lr={args.lr}")
 
     if args.test_only:
@@ -146,8 +211,13 @@ def main() -> None:
         engine.fit(model=model, datamodule=datamodule, ckpt_path=args.resume)
 
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"EdgeAD | category={args.category} | K={model.k_values} n={model.n} params={n_params / 1e6:.2f}M")
+    category = getattr(datamodule, "category", "") or ""
+    print(f"EdgeAD | {datamodule.name}{'/' + category if category else ''} | K={model.k_values} n={model.n} params={n_params / 1e6:.2f}M")
     print("=" * 78)
+
+    if not args.skip_test and not has_test_data(args):
+        print("当前配置没有测试集（folder 模式且未提供 abnormal/normal_test/test split），跳过测试阶段。")
+        args.skip_test = True
 
     results = None
     if not args.skip_test:

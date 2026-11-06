@@ -12,5 +12,8 @@ outputs/
 .tools/
 .acl-recovery/
 
+# 数据集
+datasets/
+
 # 编辑器
 .vscode/

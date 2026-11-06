@@ -186,8 +186,13 @@ python train.py --category bottle ... --predict
 
 | 参数 | 说明 |
 | --- | --- |
-| `--data-root` | MVTec AD 根目录，默认 `./datasets/mvtec` |
-| `--category` | MVTec 类别，默认 `bottle` |
+| `--data-format` | `mvtec`（默认，MVTec AD 目录）或 `folder`（通用文件夹，自采集数据用） |
+| `--data-root` | 数据集根目录，默认 `./datasets/mvtec` |
+| `--category` | MVTec 类别，默认 `bottle`（仅 `--data-format mvtec`） |
+| `--dataset-name` | folder 模式的数据集名，默认 `railway`（用于输出目录命名） |
+| `--normal-dir` / `--abnormal-dir` | folder 模式的正常/异常图目录（相对 `--data-root`） |
+| `--normal-test-dir` / `--mask-dir` | folder 模式的正常测试图 / mask 目录（可选） |
+| `--test-split-mode` / `--val-split-mode` / `--val-ratio` | folder 模式的数据划分（只有正常图时用 `none` + `from_train`） |
 | `--epochs` / `--max-steps` | 最大 epoch / 最大优化步数 |
 | `--base` | U-Net 首层通道数（论文未给宽度；64 为论文规模，CPU 建议 8~16） |
 | `--k` / `--n` | RBI 块大小集合 / 子集个数（论文 8 16 / 3） |
@@ -207,6 +212,8 @@ outputs/EdgeADLightning/MVTecAD/<category>/vN/
 └── weights/lightning/model.ckpt
 outputs/EdgeADLightning/<category>/test_metrics.json   # 测试指标
 ```
+
+folder 模式下输出目录为 `outputs/EdgeADLightning/<dataset-name>/...`（没有 category 层级）。
 
 ### 4.5 ONNX 导出与推理
 
@@ -245,6 +252,64 @@ ONNX 模型约定：
 > 代价是固定了掩码划分；PyTorch 端随机掩码的多次平均结果会略有差异。
 > 脚本中的 `EdgeADOnnxWrapper` 与 ONNX 图使用同一组掩码，`--verify` 在
 > batch=2 上实测最大误差约 `1e-6`。
+
+### 4.6 自采集铁路数据（Folder 模式）
+
+`--data-format folder` 使用 anomalib 的通用 `Folder` 数据模块，**不需要套用
+MVTec 目录结构**，目录名可以任意。
+
+只有正常图时：
+
+```
+D:\data\railway\
+└── train\                # 全部正常图
+    ├── 0001.jpg
+    ├── 0002.jpg
+    └── ...
+```
+
+```bash
+python train.py --data-format folder --data-root D:\data\railway \
+  --dataset-name railway --normal-dir train \
+  --test-split-mode none --val-split-mode from_train --val-ratio 0.1 \
+  --skip-test \
+  --base 16 --k 8 --n 3 --epochs 50 --num-workers 0
+```
+
+说明：
+
+* 验证集从正常训练图中划出（`from_train`），因此 `image_AUROC` /
+  `pixel_AUROC` / F1 在单类数据上无定义或为 nan，**训练时看 `train_loss` 即可**；
+* 没有测试集时 `train.py` 会自动跳过测试阶段（也可以显式 `--skip-test`）；
+* 部署阈值建议：在正常图上跑推理，取 `pred_score` 的 99%~99.5% 分位数作为
+  阈值；ONNX 导出时该阈值也可以写入 `edgead.json` 的 `thresholds`；
+* 灰度图会被 anomalib 的 `read_image` 自动转成 RGB，`in_ch=3` 可直接使用。
+
+以后积累了一小批带 mask 的异常图，可以把 `abnormal_dir` / `mask_dir` 配上，
+此时 pixel 指标才有意义：
+
+```
+railway/
+├── train/good/
+└── test/
+    ├── good/
+    ├── defect_a/
+    ├── defect_b/
+    └── mask/             # 文件名与异常图一一对应
+```
+
+```bash
+python train.py --data-format folder --data-root D:\data\railway \
+  --dataset-name railway --normal-dir train/good \
+  --normal-test-dir test/good \
+  --abnormal-dir test/defect_a test/defect_b \
+  --mask-dir test/mask \
+  --test-split-mode from_dir --val-split-mode same_as_test
+```
+
+> `--mask-dir` 必须**只包含与 `--abnormal-dir` 对应的 mask**：Folder 会把
+> mask 目录中的所有文件按文件名与异常图匹配，数量不一致会报错。相对路径基于
+> `--data-root`，也支持绝对路径。
 
 ---
 
