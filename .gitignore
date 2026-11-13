@@ -8,6 +8,11 @@ outputs/
 *.ckpt
 *.onnx
 
+# onnx 2 om 产物
+kernel_meta/
+fusion_result.json
+*.om
+
 # 工具临时文件
 .tools/
 .acl-recovery/
